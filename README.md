@@ -19,6 +19,13 @@ any issues and I will do my best to fix them. The Windows users
 should have a POSIX shell program installed (there used to be
 some, but I'm not sure what is the current situation).
 
+The program depends on the following external programs:
+
+    jq curl id3v2
+
+They are available on a typical Linux platform such as Debian
+Linux. Otherwise, YMMV.
+
 NB: I challenge you to implement this in Python or Perl or AWK
 or whatever programming language. Note that the usage have to
 remain the same!

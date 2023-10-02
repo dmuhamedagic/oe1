@@ -2,7 +2,7 @@
 ==============
 
 This is a program to download broadcasts of the Austrian
-public radio program Oe1. The radio offers an amazing collection
+public radio program Ö1. The radio offers an amazing collection
 of its own productions, hence this program.
 
 I hope that the program is very intuitive and that the random user

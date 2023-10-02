@@ -1,0 +1,243 @@
+#!/bin/sh
+#
+# Copyright (C) 2018 Dejan Muhamedagic
+# License: GNU General Public License (GPL)
+
+TMP_PROGF=$(mktemp)
+
+RC=$HOME/.oe1
+if [ -f $RC ]; then
+	. $RC
+fi
+
+OE1_SCHED_URL="https://audioapi.orf.at/oe1/api/json/current/broadcasts"
+OE1_KEYS="programKey broadcastDay niceTime \
+	ressort programTitle title href"
+OE1_STREAM_URL="https://loopstream01.apa.at/?channel=oe1&id=%stream_id"
+OE1_STREAM_ID='.streams[].loopStreamId'
+OE1_HTML_URL="http://oe1.orf.at/programm/%date/%id"
+
+FSEP="|"
+
+MODE=""
+
+CURL_METER="-#"
+
+BG_PROCS=""
+
+DRY=""
+QUIET=""
+
+download() {
+local id date t ressort program title href
+while IFS="$FSEP" read id date t ressort program title href
+do
+	[ "$id" -a "$date" -a "$t" -a "$href" -a "$title" ] ||
+		fatal "unrecognized oe1 program format (internal error?)"
+	is_integer "$id" || fatal "oe1 programKey not number"
+	is_integer "$date" || fatal "oe1 broadcastDay not number"
+	is_integer "$t" || fatal "oe1 niceTime not number"
+
+	program=$(echo "$program" | sanitize)
+	title=$(echo "$title" | sanitize)
+	ressort=$(echo "$ressort" | sanitize)
+
+	local basepath time mp3f htmlf jsonf
+	time=$(date --date="@$t" +"%H.%M")
+	basepath="$BASEDIR/$(echo $SAVE_TEMPLATE |
+		expand_feature_parameters)"
+	mp3f="$basepath.mp3" htmlf="$basepath.html" jsonf="$basepath.json"
+
+	local stream dir
+	dir=$(dirname "$basepath")
+	$DRY mkdir -p "$dir"
+	if [ -z "$DRY" ]; then
+		curl -s -o - "$href" | jq . > "$jsonf"
+		stream=$(jq -r "$OE1_STREAM_ID" "$jsonf")
+		[ -z "$stream" ] && fatal "could not get the stream id"
+	else
+		stream="SOME_ID"
+	fi
+
+	$QUIET echo "downloading broadcast to $mp3f"
+	$DRY curl -C - $CURL_METER -o "$mp3f" \
+		"$(echo $OE1_STREAM_URL | sed s/%stream_id/$stream/)"
+	[ $? -ne 0 ] && fatal "curl reported error on $mp3f"
+
+	local author year
+	author="oe1"
+	year=$(echo $date | sed 's/\(....\).*/\1/')
+	$DRY id3v2 -a "$author" -A "$title" -t "$date" -y "$year" "$mp3f"
+	[ $? -ne 0 ] && fatal "id3v2 reported error on $mp3f"
+
+	$DRY curl -L -s -o "$htmlf" \
+		"$(echo $OE1_HTML_URL | expand_feature_parameters)"
+
+done
+}
+
+bg() {
+	$* &
+	BG_PROCS="$BG_PROCS $!"
+}
+
+usage() {
+	cat<<EOF
+usage: $0 [-ldqnh] [<day>] [<search>]
+
+day: day of the week, such as Tue or 20180115 [default: . (whole week)]
+search: what to look for (regular expression or id) [default: .]
+
+-l: only list features found
+-d: download features
+-h: print this help message
+-q: be quiet
+-n: dry-run, show what would be done, but don't do it
+
+Examples
+
+List all features:
+	$ oe1
+List today's schedule:
+	$ oe1 today
+List last Sunday's features about culture:
+	$ oe1 sun kultur
+Download the "Im Gespräch" from last Thursday:
+	$ oe1 thu im.gespr.ch
+
+EOF
+	exit $1
+}
+
+prettyprint() {
+	awk -F"$FSEP" '
+	{ gsub("\\\\", "");
+	printf("%s: %s%s %s%s\n",
+		strftime("%a %H:%M",$3),
+		$5 ? "["$5"] " : "", $6,
+		$4 ? "("$4") " : "", $1);
+	}'
+}
+
+expand_feature_parameters() {
+	sed "
+	s|%prog_or_title|${program:-$title}|g;
+	s|%program|$program|g;
+	s|%title|$title|g;
+	s|%ressort|$ressort|g;
+	s|%time|$time|g;
+	s|%id|$id|g;
+	s|%date|$date|g"
+}
+
+fatal() {
+	echo "FATAL: $*" >&2; exit 1
+}
+sanitize() {
+	tr ':/' '._' | tr -d '<>"\\|?*'
+}
+is_prog() {
+	which $1 >/dev/null 2>&1 ||
+		fatal "we depend on $1, but $1 is not installed"
+}
+prereqs() {
+	local p progs
+	progs=""
+	for p; do
+		is_prog $p || progs="$progs $p"
+	done
+	[ -n "$progs" ] &&
+		fatal "we depend on $progs"
+}
+is_integer() {
+	echo "$*" | grep -qs '^[0-9][0-9]*$'
+}
+is_mode() {
+	echo "$MODE" | grep -wqs "$1"
+}
+
+prereqs jq curl id3v2
+
+test -f "$TMP_PROGF" ||
+	fatal "mktemp could not create a file"
+trap "rm -f $TMP_PROGF" EXIT
+
+: ${BASEDIR:="$HOME/oe1"}
+: ${SAVE_TEMPLATE:="%prog_or_title-%time/%date-%id"}
+
+while getopts "ldqnh" o; do
+	case "$o" in
+	l) MODE="$MODE list" ;;
+	d) MODE="$MODE download" ;;
+	n) DRY="echo DRY: " ;;
+	q) QUIET=":"; CURL_METER="-s";;
+	h) usage 0 ;;
+	esac
+done
+shift $(($OPTIND-1))
+if [ $# -gt 2 ]; then
+	usage 1
+fi
+
+SEARCH_DATE="."
+SEARCH_RE=$2
+if [ -n "$1" ]; then
+	day=$1
+	case "$day" in
+		fri|thu|wed|tue|mon|sun|sat) day="last $day";;
+	esac
+	SEARCH_DATE=$(date --date="$day" +%Y%m%d) 2>/dev/null
+
+	if [ $? -ne 0 ]; then
+		if [ $# -eq 1 ]; then
+			SEARCH_DATE="."
+			SEARCH_RE=$1
+		else
+			SEARCH_DATE=$1
+		fi
+
+	fi
+fi
+
+keys_list=$(echo $OE1_KEYS |
+	sed '
+	s/[[:alpha:]]\+/.&/g;
+	s/[[:space:]]\+/,/g'
+)
+OE1_JQ_FILTER='
+	.[].broadcasts[] |
+	[select(.state=="C")] |
+	map(.niceTime |= ./1000) | .[] |
+	[('"$keys_list"')] |
+	@tsv'
+
+curl -s -o - $OE1_SCHED_URL |
+	jq "$OE1_JQ_FILTER" |
+	sed 's/^"//; s/"$//;
+	s/\\t/'"$FSEP"'/g' > $TMP_PROGF
+test -s "$TMP_PROGF" ||
+	fatal "could not download the schedule"
+
+SEARCH_RE=${SEARCH_RE:-"."}
+result=$(grep "$SEARCH_DATE" $TMP_PROGF | grep -i "$SEARCH_RE")
+if [ -z "$result" ]; then
+	$QUIET echo "sorry, no broadcasts matched $SEARCH_RE"
+	exit 0
+fi
+
+if [ -z "$MODE" ]; then
+	dups=$(echo "$result" | awk -F"$FSEP" '{print $2}' | uniq -d)
+	if [ -z "$dups" ]; then
+		MODE="download"
+	else
+		MODE="list"
+	fi
+
+fi
+cnt=$(echo "$result" | wc -l)
+$QUIET echo "$result" | prettyprint
+if is_mode download; then
+	echo "$result" | download
+fi
+
+
